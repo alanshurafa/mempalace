@@ -50,6 +50,39 @@ def test_project_mining():
         shutil.rmtree(tmpdir)
 
 
+def test_project_mining_dry_run_skips_tiny_files_in_summary(capsys):
+    tmpdir = tempfile.mkdtemp()
+    try:
+        project_root = Path(tmpdir).resolve()
+        os.makedirs(project_root / "backend")
+
+        write_file(
+            project_root / "backend" / "app.py", "def main():\n    print('hello world')\n" * 20
+        )
+        write_file(project_root / "tiny.py", "x=1\n")
+        with open(project_root / "mempalace.yaml", "w") as f:
+            yaml.dump(
+                {
+                    "wing": "test_project",
+                    "rooms": [
+                        {"name": "backend", "description": "Backend code"},
+                        {"name": "general", "description": "General"},
+                    ],
+                },
+                f,
+            )
+
+        palace_path = project_root / "palace"
+        mine(str(project_root), str(palace_path), dry_run=True)
+
+        output = capsys.readouterr().out
+        assert "Done." in output
+        assert "backend" in output
+        assert "None" not in output
+    finally:
+        shutil.rmtree(tmpdir)
+
+
 def test_scan_project_respects_gitignore():
     tmpdir = tempfile.mkdtemp()
     try:
