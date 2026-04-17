@@ -54,10 +54,44 @@ mkdir -p "$STATE_DIR"
 # Leave empty to skip auto-ingest (AI handles saving via the block reason).
 MEMPAL_DIR=""
 
+resolve_python() {
+    local script_dir candidate
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    for candidate in \
+        "${MEMPALACE_PYTHON:-}" \
+        "$script_dir/../.venv/Scripts/python.exe" \
+        "$script_dir/../.venv/bin/python"
+    do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            MEMPAL_PY_CMD=("$candidate")
+            return 0
+        fi
+    done
+
+    if command -v python3 >/dev/null 2>&1; then
+        MEMPAL_PY_CMD=("python3")
+        return 0
+    fi
+    if command -v python >/dev/null 2>&1; then
+        MEMPAL_PY_CMD=("python")
+        return 0
+    fi
+    if command -v py >/dev/null 2>&1; then
+        MEMPAL_PY_CMD=("py" "-3")
+        return 0
+    fi
+
+    echo '{"decision":"block","reason":"MemPalace hook could not find a Python runtime. Configure MEMPALACE_PYTHON or create the repo .venv first."}'
+    exit 0
+}
+
+resolve_python
+
 # Read JSON input from stdin
 INPUT=$(cat)
 
-SESSION_ID=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('session_id','unknown'))" 2>/dev/null)
+SESSION_ID=$(echo "$INPUT" | "${MEMPAL_PY_CMD[@]}" -c "import sys,json; print(json.load(sys.stdin).get('session_id','unknown'))" 2>/dev/null)
 
 echo "[$(date '+%H:%M:%S')] PRE-COMPACT triggered for session $SESSION_ID" >> "$STATE_DIR/hook.log"
 
@@ -65,7 +99,7 @@ echo "[$(date '+%H:%M:%S')] PRE-COMPACT triggered for session $SESSION_ID" >> "$
 if [ -n "$MEMPAL_DIR" ] && [ -d "$MEMPAL_DIR" ]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     REPO_DIR="$(dirname "$SCRIPT_DIR")"
-    python3 -m mempalace mine "$MEMPAL_DIR" >> "$STATE_DIR/hook.log" 2>&1
+    "${MEMPAL_PY_CMD[@]}" -m mempalace mine "$MEMPAL_DIR" >> "$STATE_DIR/hook.log" 2>&1
 fi
 
 # Always block — compaction = save everything
