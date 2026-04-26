@@ -102,6 +102,13 @@ if [ -n "$MEMPAL_DIR" ] && [ -d "$MEMPAL_DIR" ]; then
     "${MEMPAL_PY_CMD[@]}" -m mempalace mine "$MEMPAL_DIR" >> "$STATE_DIR/hook.log" 2>&1
 fi
 
-# Silent: return empty JSON to not block. "decision": "allow" is invalid —
-# only "block" or {} are recognized.
-echo '{}'
+# Compaction is about to erase detailed context — always block and demand
+# the AI flush diary + KG state before we lose it. There is no opt-out:
+# this fires rarely (only when context is full) and the saved memory is
+# the only thing that survives compaction.
+cat << 'HOOKJSON'
+{
+  "decision": "block",
+  "reason": "MemPalace pre-compact checkpoint. Compaction will erase detailed context — save it now. Do TWO things:\n\n1. Call mempalace_diary_write(agent_name='claude', entry=<AAAK>, topic='precompact') with a thorough AAAK-format diary covering key topics, decisions, code changes, files touched, and surprises. Use real entity names; verbatim quotes welcome.\n\n2. For any new facts (Alan prefers X, project Y uses Z, person A is B), call mempalace_kg_add(subject, predicate, object, valid_from='today'). One call per fact.\n\nAfter saving, compaction proceeds normally."
+}
+HOOKJSON
