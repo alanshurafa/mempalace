@@ -146,6 +146,49 @@ def cmd_mine(args):
         )
 
 
+def cmd_curate(args):
+    """Run a memory-curation pass: extract KG triples + diary observations
+    from filed drawers and write them through the existing MCP tool surface.
+
+    Filters by date (--since N days) and a room allowlist; idempotent across
+    runs via state file at ~/.mempalace/curation_state.json.
+    """
+    from datetime import datetime, timedelta
+
+    from .curator import curate
+
+    palace_path = (
+        os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    )
+
+    if args.since_iso:
+        since = datetime.fromisoformat(args.since_iso)
+    else:
+        since = datetime.utcnow() - timedelta(days=args.since)
+
+    allowed = {r.strip() for r in (args.rooms or "").split(",") if r.strip()}
+    excluded = {r.strip() for r in (args.exclude_rooms or "").split(",") if r.strip()}
+
+    print(f"Curating drawers since {since.isoformat()}")
+    print(f"  rooms allowed:  {sorted(allowed) or '(none — nothing will match)'}")
+    print(f"  rooms excluded: {sorted(excluded) or '(none)'}")
+    print(f"  engine:         {args.engine}")
+    print(f"  max drawers:    {args.max_drawers}")
+    print(f"  dry-run:        {args.dry_run}")
+
+    stats = curate(
+        palace_path=palace_path,
+        since=since,
+        allowed_rooms=allowed,
+        excluded_rooms=excluded,
+        engine=args.engine,
+        max_drawers=args.max_drawers,
+        dry_run=args.dry_run,
+    )
+
+    print(f"\nCurator stats: {stats}")
+
+
 def cmd_sweep(args):
     """Sweep a transcript file or directory.
 
@@ -600,6 +643,51 @@ def main():
         help="A .jsonl transcript file, or a directory to scan recursively",
     )
 
+    # curate
+    p_curate = sub.add_parser(
+        "curate",
+        help="Extract KG triples + diary observations from filed drawers",
+    )
+    p_curate.add_argument(
+        "--since",
+        type=int,
+        default=7,
+        help="Days back to scan (ignored if --since-iso is given). Default: 7.",
+    )
+    p_curate.add_argument(
+        "--since-iso",
+        default=None,
+        help="ISO timestamp lower bound (overrides --since)",
+    )
+    p_curate.add_argument(
+        "--rooms",
+        default="general,documentation,decisions,diary,journals,proposals",
+        help="Comma-separated room allowlist (default: high-signal rooms)",
+    )
+    p_curate.add_argument(
+        "--exclude-rooms",
+        default="dashboard,data",
+        help="Comma-separated rooms to drop even if allowlisted (default: dashboard,data)",
+    )
+    p_curate.add_argument(
+        "--engine",
+        choices=["claude", "heuristic", "both"],
+        default="both",
+        help="Extraction engine (default: both — heuristic pre-filter + claude)",
+    )
+    p_curate.add_argument(
+        "--max-drawers",
+        type=int,
+        default=500,
+        dest="max_drawers",
+        help="Daily cap on drawers processed (default: 500)",
+    )
+    p_curate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Don't write to KG/diary; print summary only",
+    )
+
     # search
     p_search = sub.add_parser("search", help="Find anything, exact words")
     p_search.add_argument("query", help="What to search for")
@@ -733,6 +821,7 @@ def main():
         "split": cmd_split,
         "search": cmd_search,
         "sweep": cmd_sweep,
+        "curate": cmd_curate,
         "mcp": cmd_mcp,
         "compress": cmd_compress,
         "wake-up": cmd_wakeup,
