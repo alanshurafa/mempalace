@@ -52,7 +52,7 @@
 #
 # === CONFIGURATION ===
 
-SAVE_INTERVAL=15  # Save every N human messages (adjust to taste)
+SAVE_INTERVAL=30  # Save every N human messages (adjust to taste)
 STATE_DIR="$HOME/.mempalace/hook_state"
 mkdir -p "$STATE_DIR"
 
@@ -107,8 +107,12 @@ data = json.load(sys.stdin)
 sid = data.get('session_id', 'unknown')
 sha_raw = data.get('stop_hook_active', False)
 tp = data.get('transcript_path', '')
-# Shell-safe output — only allow alphanumeric, underscore, hyphen, slash, dot, tilde
-safe = lambda s: re.sub(r'[^a-zA-Z0-9_/.\-~]', '', str(s))
+# Shell-safe output — only allow alphanumeric, underscore, hyphen, slash, dot,
+# tilde, backslash, colon, and space (the last three for Windows paths like
+# C:\Users\Alice Smith\transcript.jsonl). The values are only ever interpolated
+# inside double-quoted shell assignments and file-existence checks, so these
+# extra characters do not introduce injection risk.
+safe = lambda s: re.sub(r'[^a-zA-Z0-9_/.\-~\\\\: ]', '', str(s))
 # Coerce stop_hook_active to strict boolean string
 sha = 'True' if sha_raw is True or str(sha_raw).lower() in ('true', '1', 'yes') else 'False'
 print(f'SESSION_ID=\"{safe(sid)}\"')
@@ -190,20 +194,21 @@ if [ "$SINCE_LAST" -ge "$SAVE_INTERVAL" ] && [ "$EXCHANGE_COUNT" -gt 0 ]; then
     fi
 
     # MEMPAL_VERBOSE toggle:
-    #   true  = developer mode — block and show diaries/code in chat
-    #   false = silent mode (default) — save in background, no chat clutter
-    # Set via: export MEMPAL_VERBOSE=true
-    if [ "$MEMPAL_VERBOSE" = "true" ] || [ "$MEMPAL_VERBOSE" = "1" ]; then
+    #   default (unset/true/1) = block-and-prompt for diary + KG triples.
+    #     This is what fills the KG. Without it, the curator (mempalace
+    #     curate) is the only path to KG content, and live-conversation
+    #     facts never get captured.
+    #   false/0 = silent mode (mining only). Use when interruption is too
+    #     costly for the work in flight.
+    if [ "$MEMPAL_VERBOSE" = "false" ] || [ "$MEMPAL_VERBOSE" = "0" ]; then
+        echo '{}'
+    else
         cat << 'HOOKJSON'
 {
   "decision": "block",
-  "reason": "MemPalace save checkpoint. Write a brief session diary entry covering key topics, decisions, and code changes since the last save. Use verbatim quotes where possible. Continue after saving."
+  "reason": "MemPalace curation checkpoint. Before continuing, do TWO things:\n\n1. Call mempalace_diary_write(agent_name='claude', entry=<AAAK>, topic='session') with a brief AAAK-format diary covering key topics, decisions, code/files changed, and any new facts about people or projects since the last save. Use real entity names; verbatim quotes welcome.\n\n2. For any new facts (Alan prefers X, project Y uses Z, person A is B), call mempalace_kg_add(subject, predicate, object, valid_from='today'). One call per fact. Be conservative — only record facts you'd stake the next session on.\n\nAfter these calls, the next Stop will let you exit normally. Continue."
 }
 HOOKJSON
-    else
-        # Silent mode: return empty JSON to not block. "decision": "allow" is
-        # not a valid value — only "block" or {} are recognized.
-        echo '{}'
     fi
 else
     # Not time yet — let the AI stop normally
