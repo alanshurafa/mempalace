@@ -244,3 +244,169 @@ def test_extract_claude_returns_empty_when_binary_missing():
     with patch("mempalace.curator.subprocess.run", side_effect=FileNotFoundError()):
         result = extract_claude(_drawer_for_claude())
     assert result == {"triples": [], "observations": []}
+
+
+# ---------------------------------------------------------------------------
+# curate() orchestrator
+# ---------------------------------------------------------------------------
+
+from mempalace.curator import curate
+
+
+def _make_drawer(did, room="decisions", text="We chose ChromaDB because local."):
+    return {
+        "id": did,
+        "metadata": {"room": room, "wing": "mempalace",
+                     "filed_at": "2026-04-23T10:00:00"},
+        "document": text,
+    }
+
+
+def test_curate_writes_triples_and_observations_for_flagged_drawers(tmp_path):
+    drawers = [
+        _make_drawer("d1"),
+        _make_drawer("d2"),
+        _make_drawer("code", text="def f(): pass"),
+    ]
+    extraction_response = {
+        "triples": [{"subject": "MemPalace", "predicate": "uses",
+                     "object": "ChromaDB", "valid_from": "2026-04-23"}],
+        "observations": ["Switched to ChromaDB."],
+    }
+
+    with patch("mempalace.curator._iter_palace_drawers", return_value=iter(drawers)), \
+         patch("mempalace.curator.extract_claude",
+               return_value=extraction_response) as mock_extract, \
+         patch("mempalace.curator.tool_kg_add") as mock_kg_add, \
+         patch("mempalace.curator.tool_diary_write") as mock_diary:
+        result = curate(
+            palace_path=str(tmp_path),
+            since=datetime.fromisoformat("2026-04-01T00:00:00"),
+            allowed_rooms={"decisions"},
+            excluded_rooms=set(),
+            engine="both",
+            max_drawers=10,
+            state_file=tmp_path / "state.json",
+        )
+
+    # Two drawers passed the heuristic (d1, d2). The third (pure code) didn't.
+    assert mock_extract.call_count == 2
+    # Each extraction yielded 1 triple → 2 kg_add calls.
+    assert mock_kg_add.call_count == 2
+    # Diary write happens once at end-of-run (summary), not per-drawer.
+    assert mock_diary.call_count == 1
+    assert result["drawers_processed"] == 2
+    assert result["triples_added"] == 2
+    assert result["observations"] == 2
+
+    state = CurationState.load(tmp_path / "state.json")
+    # All three are marked processed: d1/d2 were extracted, "code" was
+    # heuristic-rejected (so it doesn't get retried next run).
+    assert state.processed_drawer_ids == {"d1", "d2", "code"}
+    assert state.last_run_iso is not None
+
+
+def test_curate_skips_already_processed_drawers(tmp_path):
+    state_file = tmp_path / "state.json"
+    pre = CurationState.load(state_file)
+    pre.mark_processed(["d1"])
+    pre.save()
+
+    drawers = [_make_drawer("d1"), _make_drawer("d2")]
+    extraction_response = {"triples": [], "observations": []}
+
+    with patch("mempalace.curator._iter_palace_drawers", return_value=iter(drawers)), \
+         patch("mempalace.curator.extract_claude",
+               return_value=extraction_response) as mock_extract, \
+         patch("mempalace.curator.tool_kg_add"), \
+         patch("mempalace.curator.tool_diary_write"):
+        curate(
+            palace_path=str(tmp_path),
+            since=datetime.fromisoformat("2026-04-01T00:00:00"),
+            allowed_rooms={"decisions"},
+            excluded_rooms=set(),
+            engine="claude",
+            max_drawers=10,
+            state_file=state_file,
+        )
+
+    # d1 already processed; only d2 should be sent to extractor.
+    assert mock_extract.call_count == 1
+
+
+def test_curate_respects_max_drawers_cap(tmp_path):
+    drawers = [_make_drawer(f"d{i}") for i in range(20)]
+    extraction_response = {"triples": [], "observations": []}
+
+    with patch("mempalace.curator._iter_palace_drawers", return_value=iter(drawers)), \
+         patch("mempalace.curator.extract_claude",
+               return_value=extraction_response) as mock_extract, \
+         patch("mempalace.curator.tool_kg_add"), \
+         patch("mempalace.curator.tool_diary_write"):
+        result = curate(
+            palace_path=str(tmp_path),
+            since=datetime.fromisoformat("2026-04-01T00:00:00"),
+            allowed_rooms={"decisions"},
+            excluded_rooms=set(),
+            engine="claude",
+            max_drawers=5,
+            state_file=tmp_path / "state.json",
+        )
+
+    assert mock_extract.call_count == 5
+    assert result["drawers_processed"] == 5
+
+
+def test_curate_dry_run_does_not_call_kg_or_diary(tmp_path):
+    drawers = [_make_drawer("d1")]
+    extraction_response = {
+        "triples": [{"subject": "X", "predicate": "is", "object": "Y",
+                     "valid_from": None}],
+        "observations": ["something"],
+    }
+
+    with patch("mempalace.curator._iter_palace_drawers", return_value=iter(drawers)), \
+         patch("mempalace.curator.extract_claude",
+               return_value=extraction_response), \
+         patch("mempalace.curator.tool_kg_add") as mock_kg_add, \
+         patch("mempalace.curator.tool_diary_write") as mock_diary:
+        curate(
+            palace_path=str(tmp_path),
+            since=datetime.fromisoformat("2026-04-01T00:00:00"),
+            allowed_rooms={"decisions"},
+            excluded_rooms=set(),
+            engine="claude",
+            max_drawers=10,
+            state_file=tmp_path / "state.json",
+            dry_run=True,
+        )
+
+    mock_kg_add.assert_not_called()
+    mock_diary.assert_not_called()
+
+
+def test_curate_passes_source_closet_to_kg_add(tmp_path):
+    """Verbatim provenance: every triple must carry source_closet=drawer_id."""
+    drawers = [_make_drawer("provenance_drawer")]
+    extraction_response = {
+        "triples": [{"subject": "A", "predicate": "is", "object": "B",
+                     "valid_from": None}],
+        "observations": [],
+    }
+    with patch("mempalace.curator._iter_palace_drawers", return_value=iter(drawers)), \
+         patch("mempalace.curator.extract_claude",
+               return_value=extraction_response), \
+         patch("mempalace.curator.tool_kg_add") as mock_kg_add, \
+         patch("mempalace.curator.tool_diary_write"):
+        curate(
+            palace_path=str(tmp_path),
+            since=datetime.fromisoformat("2026-04-01T00:00:00"),
+            allowed_rooms={"decisions"},
+            excluded_rooms=set(),
+            engine="claude",
+            max_drawers=10,
+            state_file=tmp_path / "state.json",
+        )
+    assert mock_kg_add.call_count == 1
+    kwargs = mock_kg_add.call_args.kwargs
+    assert kwargs["source_closet"] == "provenance_drawer"

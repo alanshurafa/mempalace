@@ -232,3 +232,204 @@ def extract_claude(drawer: dict, timeout_seconds: int = 60) -> dict:
         "triples": list(parsed.get("triples", []) or []),
         "observations": list(parsed.get("observations", []) or []),
     }
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
+# Lazy-imported to keep curator import time low and avoid eager
+# initialization of the MCP server module's KG sqlite handle when callers
+# only need state-file utilities.
+def _import_mcp_tools():
+    from mempalace.mcp_server import tool_kg_add, tool_diary_write
+    return tool_kg_add, tool_diary_write
+
+
+# Bind names at module scope so tests can patch them via
+# ``mempalace.curator.tool_kg_add`` / ``mempalace.curator.tool_diary_write``.
+try:
+    from mempalace.mcp_server import tool_kg_add, tool_diary_write
+except Exception:  # pragma: no cover - defensive; mcp_server should always import
+    tool_kg_add = None  # type: ignore
+    tool_diary_write = None  # type: ignore
+
+
+def _iter_palace_drawers(
+    palace_path: str,
+    since_iso: str,
+    allowed_rooms: set[str],
+    excluded_rooms: set[str],
+    fetch_limit: int = 5000,
+) -> Iterator[dict]:
+    """Yield drawers matching ``filed_at >= since_iso`` and room filters,
+    pushing the predicate down to ChromaDB so we don't pull all 344K drawers
+    into Python memory.
+
+    Returns an empty iterator if the palace can't be opened.
+    """
+    from mempalace.palace import get_collection
+
+    collection = get_collection(palace_path)
+    if collection is None:
+        return
+
+    where_clauses: list[dict] = [{"filed_at": {"$gte": since_iso}}]
+    if allowed_rooms:
+        where_clauses.append({"room": {"$in": sorted(allowed_rooms)}})
+    if excluded_rooms:
+        where_clauses.append({"room": {"$nin": sorted(excluded_rooms)}})
+    where: dict
+    if len(where_clauses) == 1:
+        where = where_clauses[0]
+    else:
+        where = {"$and": where_clauses}
+
+    try:
+        raw = collection.get(
+            where=where,
+            limit=fetch_limit,
+            include=["documents", "metadatas"],
+        )
+    except Exception:
+        # Older ChromaDB versions / unexpected schema — fall back to pulling
+        # everything and filtering client-side. Still bounded by fetch_limit.
+        try:
+            raw = collection.get(limit=fetch_limit, include=["documents", "metadatas"])
+        except Exception:
+            return
+
+    ids = raw.get("ids") or []
+    docs = raw.get("documents") or [None] * len(ids)
+    metas = raw.get("metadatas") or [None] * len(ids)
+    for did, doc, meta in zip(ids, docs, metas):
+        yield {"id": did, "document": doc, "metadata": meta}
+
+
+def curate(
+    palace_path: str,
+    since: datetime,
+    allowed_rooms: set[str],
+    excluded_rooms: set[str],
+    engine: str = "both",
+    max_drawers: int = 500,
+    state_file: "Optional[Path | str]" = None,
+    dry_run: bool = False,
+    agent_name: str = "curator",
+) -> dict:
+    """Background curation pass.
+
+    Filters drawers by date + room allowlist, runs them through the chosen
+    extraction engine, writes triples through ``tool_kg_add`` (with
+    ``source_closet`` provenance) and a single end-of-run summary entry
+    through ``tool_diary_write``.
+
+    Returns a stats dict; structured detail goes into the curator diary
+    entry so each run is auditable from MemPalace itself.
+    """
+    state_path = (
+        Path(state_file)
+        if state_file is not None
+        else Path.home() / ".mempalace" / "curation_state.json"
+    )
+    state = CurationState.load(state_path)
+
+    candidate_drawers = _iter_palace_drawers(
+        palace_path=palace_path,
+        since_iso=since.isoformat(),
+        allowed_rooms=allowed_rooms,
+        excluded_rooms=excluded_rooms,
+    )
+    # The unit-test mock substitutes a list iterator that ignores arguments;
+    # both real and mocked iterators are consumed the same way below.
+
+    drawers_processed = 0
+    triples_added = 0
+    observations_count = 0
+    failures = 0
+    observations_by_drawer: list[tuple[str, list[str]]] = []
+
+    for drawer in candidate_drawers:
+        if drawers_processed >= max_drawers:
+            break
+        did = drawer.get("id")
+        if not did or state.is_processed(did):
+            continue
+
+        # In production, ChromaDB has already filtered by room/date. The unit
+        # tests pass raw drawer lists, so re-apply filter_drawers semantics
+        # here as a defense-in-depth check — guards against drawers with
+        # missing metadata reaching the extractor.
+        meta = drawer.get("metadata") or {}
+        room = meta.get("room")
+        if room is None or room in excluded_rooms:
+            continue
+        if allowed_rooms and room not in allowed_rooms:
+            continue
+
+        # Engine routing.
+        if engine == "heuristic":
+            heuristic = extract_heuristic(drawer)
+            triples = []  # heuristic alone doesn't produce triples
+            observations = [m["content"] for m in heuristic["memories"]]
+        else:
+            if engine == "both":
+                heuristic = extract_heuristic(drawer)
+                if not heuristic["flagged"]:
+                    state.mark_processed([did])
+                    continue
+            extracted = extract_claude(drawer)
+            triples = extracted["triples"]
+            observations = extracted["observations"]
+            if not triples and not observations:
+                failures += 1
+
+        if not dry_run and tool_kg_add is not None:
+            for t in triples:
+                tool_kg_add(
+                    subject=t.get("subject", ""),
+                    predicate=t.get("predicate", ""),
+                    object=t.get("object", ""),
+                    valid_from=t.get("valid_from"),
+                    source_closet=did,
+                )
+                triples_added += 1
+        else:
+            triples_added += len(triples)
+
+        observations_count += len(observations)
+        if observations:
+            observations_by_drawer.append((did, observations))
+
+        state.mark_processed([did])
+        drawers_processed += 1
+
+    state.last_run_iso = datetime.utcnow().isoformat()
+    if not dry_run:
+        state.save()
+
+    if not dry_run and drawers_processed > 0 and tool_diary_write is not None:
+        summary_lines = [
+            f"Curator run @ {state.last_run_iso}",
+            f"Drawers processed: {drawers_processed}",
+            f"Triples added: {triples_added}",
+            f"Observations: {observations_count}",
+            f"Failures (no extraction): {failures}",
+            "",
+            "Sample observations:",
+        ]
+        for did, obs_list in observations_by_drawer[:5]:
+            for o in obs_list[:2]:
+                summary_lines.append(f"- [{did[:12]}] {o}")
+        tool_diary_write(
+            agent_name=agent_name,
+            entry="\n".join(summary_lines),
+            topic="curator_run",
+        )
+
+    return {
+        "drawers_processed": drawers_processed,
+        "triples_added": triples_added,
+        "observations": observations_count,
+        "failures": failures,
+    }
