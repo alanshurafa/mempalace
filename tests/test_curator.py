@@ -60,3 +60,63 @@ def test_curation_state_handles_corrupt_state_file_by_starting_fresh(tmp_path):
     state = CurationState.load(state_file)
     assert state.processed_drawer_ids == set()
     assert state.last_run_iso is None
+
+
+# ---------------------------------------------------------------------------
+# filter_drawers
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta
+
+from mempalace.curator import filter_drawers
+
+
+def test_filter_drawers_returns_only_allowlisted_rooms_within_window():
+    now = datetime.fromisoformat("2026-04-24T12:00:00")
+    drawers = [
+        # In window, in allowlist — keep.
+        {"id": "d1", "metadata": {"room": "decisions", "wing": "mempalace",
+                                   "filed_at": "2026-04-23T10:00:00"},
+         "document": "Decided X."},
+        # In window, NOT in allowlist — drop.
+        {"id": "d2", "metadata": {"room": "dashboard", "wing": "exocortex",
+                                   "filed_at": "2026-04-23T10:00:00"},
+         "document": "graph data"},
+        # In allowlist but OUT of window — drop.
+        {"id": "d3", "metadata": {"room": "diary", "wing": "wing_claude",
+                                   "filed_at": "2026-03-01T10:00:00"},
+         "document": "old"},
+        # In allowlist, in window, but exclude_rooms hits — drop.
+        {"id": "d4", "metadata": {"room": "data", "wing": "x",
+                                   "filed_at": "2026-04-23T10:00:00"},
+         "document": "raw"},
+    ]
+    kept = list(
+        filter_drawers(
+            drawers,
+            since=now - timedelta(days=7),
+            allowed_rooms={"decisions", "diary", "data"},
+            excluded_rooms={"data"},
+        )
+    )
+    assert [d["id"] for d in kept] == ["d1"]
+
+
+def test_filter_drawers_skips_drawers_with_missing_metadata():
+    """ChromaDB occasionally returns None metadata; don't crash the run."""
+    drawers = [
+        {"id": "ok", "metadata": {"room": "decisions", "wing": "x",
+                                   "filed_at": "2026-04-23T10:00:00"},
+         "document": "."},
+        {"id": "no_meta", "metadata": None, "document": "."},
+        {"id": "no_filed_at", "metadata": {"room": "decisions"}, "document": "."},
+    ]
+    kept = list(
+        filter_drawers(
+            drawers,
+            since=datetime.fromisoformat("2026-04-01T00:00:00"),
+            allowed_rooms={"decisions"},
+            excluded_rooms=set(),
+        )
+    )
+    assert [d["id"] for d in kept] == ["ok"]

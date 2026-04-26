@@ -16,8 +16,9 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Iterator, Optional
 
 
 @dataclass
@@ -80,3 +81,31 @@ class CurationState:
                 except OSError:
                     pass
             raise
+
+
+def filter_drawers(
+    drawers: Iterable[dict],
+    since: datetime,
+    allowed_rooms: set[str],
+    excluded_rooms: set[str],
+) -> Iterator[dict]:
+    """Yield drawers that are filed at-or-after ``since``, in ``allowed_rooms``,
+    and not in ``excluded_rooms``. Drawers with missing or malformed metadata
+    are skipped silently — chroma occasionally returns ``None`` metadata under
+    upgrade/migration scenarios."""
+    since_iso = since.isoformat()
+    for drawer in drawers:
+        meta = drawer.get("metadata") or {}
+        if not meta:
+            continue
+        room = meta.get("room")
+        filed_at = meta.get("filed_at")
+        if room is None or filed_at is None:
+            continue
+        if room in excluded_rooms:
+            continue
+        if room not in allowed_rooms:
+            continue
+        if filed_at < since_iso:
+            continue
+        yield drawer
