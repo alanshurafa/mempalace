@@ -120,3 +120,46 @@ def test_filter_drawers_skips_drawers_with_missing_metadata():
         )
     )
     assert [d["id"] for d in kept] == ["ok"]
+
+
+# ---------------------------------------------------------------------------
+# extract_heuristic
+# ---------------------------------------------------------------------------
+
+from mempalace.curator import extract_heuristic
+
+
+def test_extract_heuristic_flags_drawer_with_decision_marker():
+    drawer = {
+        "id": "d1",
+        "metadata": {"room": "decisions", "wing": "mempalace",
+                     "filed_at": "2026-04-23T10:00:00"},
+        "document": "We decided to use ChromaDB because it's local and zero-API.",
+    }
+    result = extract_heuristic(drawer)
+    assert result["flagged"] is True
+    assert any(m["memory_type"] == "decision" for m in result["memories"])
+
+
+def test_extract_heuristic_does_not_flag_pure_code():
+    drawer = {
+        "id": "d2",
+        "metadata": {"room": "decisions", "wing": "mempalace",
+                     "filed_at": "2026-04-23T10:00:00"},
+        "document": "def add(a, b):\n    return a + b\n",
+    }
+    result = extract_heuristic(drawer)
+    assert result["flagged"] is False
+    assert result["memories"] == []
+
+
+def test_extract_heuristic_handles_empty_document():
+    drawer = {
+        "id": "empty",
+        "metadata": {"room": "decisions", "wing": "x",
+                     "filed_at": "2026-04-23T10:00:00"},
+        "document": "",
+    }
+    result = extract_heuristic(drawer)
+    assert result["flagged"] is False
+    assert result["memories"] == []

@@ -109,3 +109,21 @@ def filter_drawers(
         if filed_at < since_iso:
             continue
         yield drawer
+
+
+def extract_heuristic(drawer: dict, min_confidence: float = 0.3) -> dict:
+    """Run :mod:`mempalace.general_extractor` over a drawer's document text.
+
+    Returns ``{"flagged": bool, "memories": [...]}``. ``flagged`` is True when
+    at least one memory marker fired; this is the cheap pre-filter that
+    decides which drawers are worth a more expensive LLM extraction pass.
+    """
+    from mempalace import general_extractor  # local import to avoid cycles
+
+    document = drawer.get("document") or ""
+    if not document:
+        return {"flagged": False, "memories": []}
+    memories = general_extractor.extract_memories(
+        document, min_confidence=min_confidence
+    )
+    return {"flagged": bool(memories), "memories": memories}
