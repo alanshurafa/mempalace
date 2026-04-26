@@ -152,6 +152,37 @@ class TestHandleRequest:
         resp = handle_request({"method": "unknown/method", "id": 4, "params": {}})
         assert resp["error"]["code"] == -32601
 
+    def test_handler_exception_includes_diagnostic_detail(self, monkeypatch):
+        """Tool exceptions should surface type + truncated message + tool name
+        so callers (especially AI agents) can self-diagnose instead of being
+        told only "Internal tool error".
+        """
+        from mempalace import mcp_server
+        from mempalace.mcp_server import handle_request
+
+        original = mcp_server.TOOLS["mempalace_status"]["handler"]
+
+        def boom():
+            raise RuntimeError("simulated handler failure for test")
+
+        monkeypatch.setitem(mcp_server.TOOLS["mempalace_status"], "handler", boom)
+        try:
+            resp = handle_request(
+                {
+                    "method": "tools/call",
+                    "id": 42,
+                    "params": {"name": "mempalace_status", "arguments": {}},
+                }
+            )
+        finally:
+            mcp_server.TOOLS["mempalace_status"]["handler"] = original
+
+        assert resp["error"]["code"] == -32000
+        msg = resp["error"]["message"]
+        assert "mempalace_status" in msg, f"tool name should appear in error: {msg}"
+        assert "RuntimeError" in msg, f"exception type should appear in error: {msg}"
+        assert "simulated handler failure" in msg, f"original message should appear in error: {msg}"
+
     def test_any_notification_returns_none(self):
         """All notifications/* methods should return None (no response)."""
         from mempalace.mcp_server import handle_request
@@ -476,9 +507,9 @@ class TestWriteTools:
 
         assert result1["success"] is True
         assert result2["success"] is True
-        assert (
-            result1["drawer_id"] != result2["drawer_id"]
-        ), "Documents with shared header but different content must have distinct drawer IDs"
+        assert result1["drawer_id"] != result2["drawer_id"], (
+            "Documents with shared header but different content must have distinct drawer IDs"
+        )
 
     def test_delete_drawer(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)

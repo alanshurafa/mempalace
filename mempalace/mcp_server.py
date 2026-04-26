@@ -1656,12 +1656,20 @@ def handle_request(request):
                 "id": req_id,
                 "result": {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]},
             }
-        except Exception:
+        except Exception as exc:
             logger.exception(f"Tool error in {tool_name}")
+            # Surface exception type + truncated message so callers (especially
+            # AI agents) can self-diagnose. Server-side log still has the full
+            # traceback; this just stops "Internal tool error" from being the
+            # entire signal returned to the client.
+            detail = f"{type(exc).__name__}: {str(exc)[:300]}"
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "error": {"code": -32000, "message": "Internal tool error"},
+                "error": {
+                    "code": -32000,
+                    "message": f"Internal tool error in {tool_name}: {detail}",
+                },
             }
 
     # Notifications (missing id) must never get a response
