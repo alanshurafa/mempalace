@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -127,3 +129,106 @@ def extract_heuristic(drawer: dict, min_confidence: float = 0.3) -> dict:
         document, min_confidence=min_confidence
     )
     return {"flagged": bool(memories), "memories": memories}
+
+
+# ---------------------------------------------------------------------------
+# Claude CLI extraction backend
+# ---------------------------------------------------------------------------
+
+
+_EXTRACTION_PROMPT_TEMPLATE = """You are a memory curator for a verbatim AI memory system.
+
+Read the drawer text below and extract any FACTS about entities (people, projects,
+tools, concepts) and OBSERVATIONS worth recording in a session diary. Be conservative
+- prefer fewer high-quality items over many speculative ones.
+
+Output STRICT JSON, no prose. Schema:
+{{
+  "triples": [
+    {{"subject": "EntityA", "predicate": "uses", "object": "EntityB",
+      "valid_from": "ISO date or null"}}
+  ],
+  "observations": ["one-sentence factual observation", ...]
+}}
+
+Rules:
+- Use real entity names from the text. Do NOT invent.
+- Predicates should be short verb phrases (uses, decided, prefers, owns, switched_to).
+- Skip code-style content (function bodies, configs); focus on natural-language statements.
+- valid_from = the drawer's filed_at date when the text doesn't supply one.
+- Return {{"triples": [], "observations": []}} if nothing memory-worthy is present.
+
+Drawer metadata: wing={wing} room={room} drawer_id={drawer_id} filed_at={filed_at}
+
+Drawer text:
+\"\"\"
+{document}
+\"\"\"
+"""
+
+
+def build_extraction_prompt(drawer: dict) -> str:
+    """Build the extraction prompt for a single drawer.
+
+    Document text is capped at 6000 chars — drawer content is bounded by
+    miner.CHUNK_SIZE (~800 chars) so this only ever truncates pathological
+    cases.
+    """
+    meta = drawer.get("metadata") or {}
+    return _EXTRACTION_PROMPT_TEMPLATE.format(
+        wing=meta.get("wing", "?"),
+        room=meta.get("room", "?"),
+        drawer_id=drawer.get("id", "?"),
+        filed_at=meta.get("filed_at", "?"),
+        document=(drawer.get("document") or "")[:6000],
+    )
+
+
+_JSON_BLOCK_RE = re.compile(r"\{[\s\S]*\}")
+
+
+def extract_claude(drawer: dict, timeout_seconds: int = 60) -> dict:
+    """Call ``claude -p`` with the extraction prompt; parse JSON response.
+
+    Returns ``{"triples": [...], "observations": [...]}``, both empty on any
+    failure (timeout, missing binary, non-zero exit, malformed JSON). Failures
+    are silent so a single bad drawer doesn't kill the whole run; the
+    orchestrator counts failures and surfaces them in the run summary.
+    """
+    prompt = build_extraction_prompt(drawer)
+    try:
+        result = subprocess.run(
+            ["claude", "-p"],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            encoding="utf-8",
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return {"triples": [], "observations": []}
+
+    if result.returncode != 0:
+        return {"triples": [], "observations": []}
+
+    raw = (result.stdout or "").strip()
+    # Try strict JSON first; fall back to first {...} block in case Claude
+    # wrapped the response in commentary.
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        match = _JSON_BLOCK_RE.search(raw)
+        if not match:
+            return {"triples": [], "observations": []}
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return {"triples": [], "observations": []}
+
+    if not isinstance(parsed, dict):
+        return {"triples": [], "observations": []}
+
+    return {
+        "triples": list(parsed.get("triples", []) or []),
+        "observations": list(parsed.get("observations", []) or []),
+    }

@@ -163,3 +163,84 @@ def test_extract_heuristic_handles_empty_document():
     result = extract_heuristic(drawer)
     assert result["flagged"] is False
     assert result["memories"] == []
+
+
+# ---------------------------------------------------------------------------
+# extract_claude  (subprocess backend, mocked in unit tests)
+# ---------------------------------------------------------------------------
+
+from unittest.mock import patch, MagicMock
+
+from mempalace.curator import extract_claude, build_extraction_prompt
+
+
+def _drawer_for_claude():
+    return {
+        "id": "d1",
+        "metadata": {"wing": "mempalace", "room": "decisions",
+                     "filed_at": "2026-04-23T10:00:00"},
+        "document": "We chose ChromaDB.",
+    }
+
+
+def test_build_extraction_prompt_includes_drawer_text_and_instructions():
+    prompt = build_extraction_prompt(_drawer_for_claude())
+    assert "We chose ChromaDB." in prompt
+    assert "JSON" in prompt
+    assert "triples" in prompt.lower()
+    assert "d1" in prompt
+
+
+def test_extract_claude_parses_valid_json_response():
+    fake_response = (
+        '{"triples": [{"subject": "MemPalace", "predicate": "uses", '
+        '"object": "ChromaDB", "valid_from": "2026-04-23"}], '
+        '"observations": ["MemPalace switched to ChromaDB."]}'
+    )
+    with patch("mempalace.curator.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(stdout=fake_response, returncode=0, stderr="")
+        result = extract_claude(_drawer_for_claude())
+
+    assert len(result["triples"]) == 1
+    assert result["triples"][0]["subject"] == "MemPalace"
+    assert result["observations"] == ["MemPalace switched to ChromaDB."]
+
+
+def test_extract_claude_extracts_json_block_from_chatty_response():
+    fake_response = (
+        "Here is the extraction:\n"
+        '{"triples": [], "observations": ["just an obs"]}\n'
+        "Hope this helps!"
+    )
+    with patch("mempalace.curator.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(stdout=fake_response, returncode=0, stderr="")
+        result = extract_claude(_drawer_for_claude())
+    assert result == {"triples": [], "observations": ["just an obs"]}
+
+
+def test_extract_claude_returns_empty_on_invalid_json():
+    with patch("mempalace.curator.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(stdout="this is not JSON", returncode=0, stderr="")
+        result = extract_claude(_drawer_for_claude())
+    assert result == {"triples": [], "observations": []}
+
+
+def test_extract_claude_returns_empty_on_subprocess_error():
+    with patch("mempalace.curator.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(stdout="", returncode=1, stderr="boom")
+        result = extract_claude(_drawer_for_claude())
+    assert result == {"triples": [], "observations": []}
+
+
+def test_extract_claude_returns_empty_on_timeout():
+    import subprocess as _sp
+    with patch("mempalace.curator.subprocess.run",
+               side_effect=_sp.TimeoutExpired("claude", 60)):
+        result = extract_claude(_drawer_for_claude())
+    assert result == {"triples": [], "observations": []}
+
+
+def test_extract_claude_returns_empty_when_binary_missing():
+    with patch("mempalace.curator.subprocess.run", side_effect=FileNotFoundError()):
+        result = extract_claude(_drawer_for_claude())
+    assert result == {"triples": [], "observations": []}
