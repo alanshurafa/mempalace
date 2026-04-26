@@ -28,17 +28,20 @@ class TestSaveHookVerboseMode:
         )
 
     def test_verbose_mode_blocks(self):
-        """When verbose, hook should use decision: block so agent writes in chat."""
+        """When verbose (the new default), hook returns decision:block so the
+        agent writes diary + KG triples in chat. The silent path returns
+        ``{}`` — Claude Code's hook protocol only recognizes ``block`` or
+        empty JSON; ``"allow"`` is not a valid decision value.
+        """
         hook_path = os.path.join(
             os.path.dirname(os.path.dirname(__file__)),
             "hooks",
             "mempal_save_hook.sh",
         )
         src = open(hook_path).read()
-        # There should be TWO decision paths: block (verbose) and allow (silent)
         has_block = '"decision": "block"' in src or "'decision': 'block'" in src
-        has_allow = '"decision": "allow"' in src or "'decision': 'allow'" in src
-        assert has_block and has_allow, (
-            "Hook needs both 'block' (verbose/developer) and 'allow' (silent) paths. "
-            f"Has block: {has_block}, has allow: {has_allow}"
+        has_silent_path = "echo '{}'" in src or 'echo "{}"' in src
+        assert has_block and has_silent_path, (
+            "Hook needs both a block path (verbose/default) and a silent "
+            f"path returning '{{}}'. Has block: {has_block}, has silent: {has_silent_path}"
         )

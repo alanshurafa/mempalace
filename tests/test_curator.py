@@ -410,3 +410,62 @@ def test_curate_passes_source_closet_to_kg_add(tmp_path):
     assert mock_kg_add.call_count == 1
     kwargs = mock_kg_add.call_args.kwargs
     assert kwargs["source_closet"] == "provenance_drawer"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end integration test against a real ChromaDB collection
+# ---------------------------------------------------------------------------
+
+
+def test_curator_writes_to_real_palace_via_heuristic(tmp_path, monkeypatch):
+    """End-to-end: file a drawer in a temp palace, run curator with the
+    heuristic engine (no Claude needed), verify stats and side effects.
+
+    Uses ``engine="heuristic"`` to avoid hitting the real ``claude`` CLI in
+    CI. The heuristic path produces no triples (kg_add is not called) but
+    does extract observations into the curator diary entry, exercising
+    the full orchestrator + ChromaDB + state-file path.
+    """
+    from mempalace.palace import get_collection
+    from mempalace.curator import curate
+
+    palace = tmp_path / "palace"
+    palace.mkdir()
+
+    coll = get_collection(str(palace))
+    coll.add(
+        ids=["smoke-1"],
+        documents=[
+            "We decided to use ChromaDB because it is local-first and zero-API."
+        ],
+        metadatas=[
+            {
+                "room": "decisions",
+                "wing": "mempalace",
+                "filed_at": "2026-04-23T10:00:00",
+            }
+        ],
+    )
+
+    # Mock tool_diary_write so we don't write into the real palace's diary.
+    with patch("mempalace.curator.tool_diary_write") as mock_diary:
+        stats = curate(
+            palace_path=str(palace),
+            since=datetime.fromisoformat("2026-04-01T00:00:00"),
+            allowed_rooms={"decisions"},
+            excluded_rooms=set(),
+            engine="heuristic",
+            max_drawers=10,
+            state_file=tmp_path / "state.json",
+        )
+
+    assert stats["drawers_processed"] == 1
+    assert stats["observations"] >= 1
+    # Heuristic engine: no triples produced.
+    assert stats["triples_added"] == 0
+    # Diary was written exactly once at end-of-run.
+    assert mock_diary.call_count == 1
+
+    # State persisted.
+    state = CurationState.load(tmp_path / "state.json")
+    assert "smoke-1" in state.processed_drawer_ids
