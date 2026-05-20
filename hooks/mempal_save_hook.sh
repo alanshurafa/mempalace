@@ -117,13 +117,15 @@ INPUT=$(cat)
 
 # Parse all fields in a single Python call (3x faster than separate invocations)
 # without invoking ``eval`` on generated code: Python prints one sanitized
-# value per line, the shell reads them via ``mapfile`` and does plain
-# variable assignment — same data, smaller blast radius if the sanitizer
-# is ever bypassed (#1231 review).
-mapfile -t _mempal_parsed < <(echo "$INPUT" | "${MEMPAL_PY_CMD[@]}" -c "
+# value per line, the shell reads them with the POSIX ``read`` builtin and
+# does plain variable assignment — same data, smaller blast radius if the
+# sanitizer is ever bypassed (#1231 review). ``read`` is used rather than
+# ``mapfile``/``readarray``, which are bash 4.0+ only — macOS ships bash 3.2.
+{ IFS= read -r SESSION_ID; IFS= read -r STOP_HOOK_ACTIVE; IFS= read -r TRANSCRIPT_PATH; } \
+  < <(echo "$INPUT" | "${MEMPAL_PY_CMD[@]}" -c "
 import sys, json, re
 # Force LF line endings — on Windows, print() writes CRLF by default which
-# leaves a trailing \r in each value as mapfile sees it.
+# leaves a trailing \r in each value the shell would otherwise read.
 sys.stdout.reconfigure(newline='')
 data = json.load(sys.stdin)
 sid = data.get('session_id', 'unknown')
@@ -141,9 +143,9 @@ print(safe(sid))
 print(sha)
 print(safe(tp))
 " 2>/dev/null | tr -d '\r')
-SESSION_ID="${_mempal_parsed[0]:-unknown}"
-STOP_HOOK_ACTIVE="${_mempal_parsed[1]:-False}"
-TRANSCRIPT_PATH="${_mempal_parsed[2]:-}"
+SESSION_ID="${SESSION_ID:-unknown}"
+STOP_HOOK_ACTIVE="${STOP_HOOK_ACTIVE:-False}"
+TRANSCRIPT_PATH="${TRANSCRIPT_PATH:-}"
 
 # Expand ~ in path
 TRANSCRIPT_PATH="${TRANSCRIPT_PATH/#\~/$HOME}"

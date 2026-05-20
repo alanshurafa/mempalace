@@ -96,13 +96,15 @@ resolve_python
 INPUT=$(cat)
 
 # Parse session_id and transcript_path in one call. Sanitize both, then
-# read sanitized values from one-per-line stdout into shell variables —
-# avoids ``eval`` on generated code (#1231 review). Same contract as
-# mempal_save_hook.sh.
-mapfile -t _mempal_parsed < <(echo "$INPUT" | "${MEMPAL_PY_CMD[@]}" -c "
+# read sanitized values from one-per-line stdout into shell variables with
+# the POSIX ``read`` builtin — avoids ``eval`` on generated code (#1231
+# review) and works on bash 3.2 (macOS), unlike ``mapfile``. Same contract
+# as mempal_save_hook.sh.
+{ IFS= read -r SESSION_ID; IFS= read -r TRANSCRIPT_PATH; } \
+  < <(echo "$INPUT" | "${MEMPAL_PY_CMD[@]}" -c "
 import sys, json, re
 # Force LF line endings — on Windows, print() writes CRLF by default which
-# leaves a trailing \r in each value as mapfile sees it.
+# leaves a trailing \r in each value the shell would otherwise read.
 sys.stdout.reconfigure(newline='')
 data = json.load(sys.stdin)
 sid = data.get('session_id', 'unknown')
@@ -111,8 +113,8 @@ safe = lambda s: re.sub(r'[^a-zA-Z0-9_/.\-~]', '', str(s))
 print(safe(sid))
 print(safe(tp))
 " 2>/dev/null | tr -d '\r')
-SESSION_ID="${_mempal_parsed[0]:-unknown}"
-TRANSCRIPT_PATH="${_mempal_parsed[1]:-}"
+SESSION_ID="${SESSION_ID:-unknown}"
+TRANSCRIPT_PATH="${TRANSCRIPT_PATH:-}"
 
 # Expand ~ in path
 TRANSCRIPT_PATH="${TRANSCRIPT_PATH/#\~/$HOME}"
