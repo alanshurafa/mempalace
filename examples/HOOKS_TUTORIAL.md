@@ -62,5 +62,5 @@ mempalace mine ~/.claude/projects/ --mode convos
 ### 5. Configuration
 
 - **`SAVE_INTERVAL=15`** — How many human messages between saves
-- **`MEMPALACE_PYTHON`** — Python interpreter with mempalace + chromadb. Auto-detects: env var → repo venv → system python3
+- **`MEMPAL_PYTHON`** — Python interpreter with mempalace + chromadb (`MEMPALACE_PYTHON` accepted as a back-compat alias). Auto-detects: env var → repo venv → system python3
 - **`MEMPAL_DIR`** — Optional directory for auto-ingest via `mempalace mine`

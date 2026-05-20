@@ -3,13 +3,16 @@ set -euo pipefail
 HOOK_NAME="${1:?Usage: mempal-hook.sh <hook-name>}"
 
 run_mempalace_hook() {
-  # Explicit MEMPALACE_PYTHON override — useful when mempalace is installed in
-  # a venv that isn't on PATH (common on Windows where venv\Scripts isn't
-  # auto-added to GUI-launched processes).
-  if [ -n "${MEMPALACE_PYTHON:-}" ] && [ -x "${MEMPALACE_PYTHON}" ] && "${MEMPALACE_PYTHON}" -c "import mempalace" >/dev/null 2>&1; then
-    "$MEMPALACE_PYTHON" -m mempalace hook run "$@"
-    return $?
-  fi
+  # Explicit interpreter override — useful when mempalace is installed in a
+  # venv that isn't on PATH (common on Windows where venv\Scripts isn't
+  # auto-added to GUI-launched processes). MEMPAL_PYTHON is the documented
+  # name; MEMPALACE_PYTHON is accepted as a back-compat alias.
+  for _mp in "${MEMPAL_PYTHON:-}" "${MEMPALACE_PYTHON:-}"; do
+    if [ -n "$_mp" ] && [ -x "$_mp" ] && "$_mp" -c "import mempalace" >/dev/null 2>&1; then
+      "$_mp" -m mempalace hook run "$@"
+      return $?
+    fi
+  done
 
   if command -v mempalace >/dev/null 2>&1; then
     mempalace hook run "$@"

@@ -4,6 +4,8 @@ Hook output is the contract with Claude Code's runtime. If it changes
 shape, that's an explicit decision — not an accident.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import shutil

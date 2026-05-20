@@ -56,12 +56,13 @@ mkdir -p "$STATE_DIR"
 MEMPAL_DIR=""
 
 # Resolve the Python interpreter. Same contract as mempal_save_hook.sh:
-# MEMPALACE_PYTHON → repo .venv → python3 → python → py -3.
+# MEMPAL_PYTHON → MEMPALACE_PYTHON (alias) → repo .venv → python3 → python → py -3.
 resolve_python() {
     local script_dir candidate
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
     for candidate in \
+        "${MEMPAL_PYTHON:-}" \
         "${MEMPALACE_PYTHON:-}" \
         "$script_dir/../.venv/Scripts/python.exe" \
         "$script_dir/../.venv/bin/python"
@@ -85,7 +86,7 @@ resolve_python() {
         return 0
     fi
 
-    echo '{"decision":"block","reason":"MemPalace hook could not find a Python runtime. Configure MEMPALACE_PYTHON or create the repo .venv first."}'
+    echo '{"decision":"block","reason":"MemPalace hook could not find a Python runtime. Configure MEMPAL_PYTHON or create the repo .venv first."}'
     exit 0
 }
 

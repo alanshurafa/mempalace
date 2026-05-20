@@ -63,15 +63,17 @@ def _mempalace_python() -> str:
 
     When hooks are invoked by Claude Code, sys.executable may be the system
     python which lacks chromadb and other deps.  Resolution order:
-    1. MEMPALACE_PYTHON env var (explicit override)
+    1. MEMPAL_PYTHON / MEMPALACE_PYTHON env var (explicit override)
     2. Venv python from package install path
     3. Editable install: venv/ sibling to mempalace/
     4. sys.executable fallback
     """
-    # Honor explicit override (used by shell hook wrappers)
-    env_python = os.environ.get("MEMPALACE_PYTHON", "")
-    if env_python and os.path.isfile(env_python) and os.access(env_python, os.X_OK):
-        return env_python
+    # Honor explicit override (used by shell hook wrappers). MEMPAL_PYTHON is
+    # the documented name; MEMPALACE_PYTHON is accepted as a back-compat alias.
+    for _var in ("MEMPAL_PYTHON", "MEMPALACE_PYTHON"):
+        env_python = os.environ.get(_var, "")
+        if env_python and os.path.isfile(env_python) and os.access(env_python, os.X_OK):
+            return env_python
     # This file lives at <venv>/lib/pythonX.Y/site-packages/mempalace/hooks_cli.py
     # or <project>/mempalace/hooks_cli.py (editable install).
     venv_bin = Path(__file__).resolve().parents[3] / "bin" / "python"

@@ -68,19 +68,21 @@ MEMPAL_DIR=""
 # harness that doesn't inherit the user's shell PATH) may find a `python3`
 # on PATH that lacks mempalace — e.g. /usr/bin/python3 while the user
 # installed mempalace into a venv. Users in that situation can point the
-# hook at the right interpreter by exporting MEMPALACE_PYTHON.
+# hook at the right interpreter by exporting MEMPAL_PYTHON.
 #
 # Resolution order (first hit wins):
-#   1. $MEMPALACE_PYTHON       — explicit user override (absolute path)
-#   2. <repo>/.venv/Scripts/python.exe or <repo>/.venv/bin/python
-#   3. $(command -v python3)   — first python3 on PATH
-#   4. $(command -v python)    — first python on PATH
-#   5. py -3                   — Windows py launcher fallback
+#   1. $MEMPAL_PYTHON          — explicit user override (absolute path)
+#   2. $MEMPALACE_PYTHON       — back-compat alias for $MEMPAL_PYTHON
+#   3. <repo>/.venv/Scripts/python.exe or <repo>/.venv/bin/python
+#   4. $(command -v python3)   — first python3 on PATH
+#   5. $(command -v python)    — first python on PATH
+#   6. py -3                   — Windows py launcher fallback
 resolve_python() {
     local script_dir candidate
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
     for candidate in \
+        "${MEMPAL_PYTHON:-}" \
         "${MEMPALACE_PYTHON:-}" \
         "$script_dir/../.venv/Scripts/python.exe" \
         "$script_dir/../.venv/bin/python"
@@ -104,7 +106,7 @@ resolve_python() {
         return 0
     fi
 
-    echo '{"decision":"block","reason":"MemPalace hook could not find a Python runtime. Configure MEMPALACE_PYTHON or create the repo .venv first."}'
+    echo '{"decision":"block","reason":"MemPalace hook could not find a Python runtime. Configure MEMPAL_PYTHON or create the repo .venv first."}'
     exit 0
 }
 
