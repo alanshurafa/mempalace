@@ -18,7 +18,7 @@ import re
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
@@ -125,9 +125,7 @@ def extract_heuristic(drawer: dict, min_confidence: float = 0.3) -> dict:
     document = drawer.get("document") or ""
     if not document:
         return {"flagged": False, "memories": []}
-    memories = general_extractor.extract_memories(
-        document, min_confidence=min_confidence
-    )
+    memories = general_extractor.extract_memories(document, min_confidence=min_confidence)
     return {"flagged": bool(memories), "memories": memories}
 
 
@@ -238,11 +236,13 @@ def extract_claude(drawer: dict, timeout_seconds: int = 60) -> dict:
 # Orchestrator
 # ---------------------------------------------------------------------------
 
+
 # Lazy-imported to keep curator import time low and avoid eager
 # initialization of the MCP server module's KG sqlite handle when callers
 # only need state-file utilities.
 def _import_mcp_tools():
     from mempalace.mcp_server import tool_kg_add, tool_diary_write
+
     return tool_kg_add, tool_diary_write
 
 
@@ -404,7 +404,7 @@ def curate(
         state.mark_processed([did])
         drawers_processed += 1
 
-    state.last_run_iso = datetime.utcnow().isoformat()
+    state.last_run_iso = datetime.now(timezone.utc).isoformat()
     if not dry_run:
         state.save()
 

@@ -4,6 +4,8 @@ Hook output is the contract with Claude Code's runtime. If it changes
 shape, that's an explicit decision — not an accident.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import shutil
@@ -53,9 +55,7 @@ def _write_transcript(path: Path, n_user_messages: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         for i in range(n_user_messages):
-            f.write(
-                json.dumps({"message": {"role": "user", "content": f"msg {i}"}}) + "\n"
-            )
+            f.write(json.dumps({"message": {"role": "user", "content": f"msg {i}"}}) + "\n")
 
 
 def test_save_hook_blocks_at_save_interval_with_structured_prompt(tmp_path):

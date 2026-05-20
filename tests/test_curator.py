@@ -1,11 +1,19 @@
 """Tests for the memory curator (mempalace.curator)."""
 
 import json
-import os
+from datetime import datetime, timedelta
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from mempalace.curator import CurationState
+from mempalace.curator import (
+    CurationState,
+    build_extraction_prompt,
+    curate,
+    extract_claude,
+    extract_heuristic,
+    filter_drawers,
+)
 
 
 def test_curation_state_round_trips_through_disk(tmp_path):
@@ -26,9 +34,7 @@ def test_curation_state_round_trips_through_disk(tmp_path):
 def test_curation_state_save_is_atomic(tmp_path, monkeypatch):
     """Writes go through a temp file + rename so a crash mid-write doesn't truncate."""
     state_file = tmp_path / "state.json"
-    state_file.write_text(
-        '{"processed_drawer_ids": ["existing"], "last_run_iso": "2026-04-23"}'
-    )
+    state_file.write_text('{"processed_drawer_ids": ["existing"], "last_run_iso": "2026-04-23"}')
     state = CurationState.load(state_file)
     state.mark_processed(["new_drawer"])
 
@@ -66,30 +72,42 @@ def test_curation_state_handles_corrupt_state_file_by_starting_fresh(tmp_path):
 # filter_drawers
 # ---------------------------------------------------------------------------
 
-from datetime import datetime, timedelta
-
-from mempalace.curator import filter_drawers
-
 
 def test_filter_drawers_returns_only_allowlisted_rooms_within_window():
     now = datetime.fromisoformat("2026-04-24T12:00:00")
     drawers = [
         # In window, in allowlist — keep.
-        {"id": "d1", "metadata": {"room": "decisions", "wing": "mempalace",
-                                   "filed_at": "2026-04-23T10:00:00"},
-         "document": "Decided X."},
+        {
+            "id": "d1",
+            "metadata": {
+                "room": "decisions",
+                "wing": "mempalace",
+                "filed_at": "2026-04-23T10:00:00",
+            },
+            "document": "Decided X.",
+        },
         # In window, NOT in allowlist — drop.
-        {"id": "d2", "metadata": {"room": "dashboard", "wing": "exocortex",
-                                   "filed_at": "2026-04-23T10:00:00"},
-         "document": "graph data"},
+        {
+            "id": "d2",
+            "metadata": {
+                "room": "dashboard",
+                "wing": "exocortex",
+                "filed_at": "2026-04-23T10:00:00",
+            },
+            "document": "graph data",
+        },
         # In allowlist but OUT of window — drop.
-        {"id": "d3", "metadata": {"room": "diary", "wing": "wing_claude",
-                                   "filed_at": "2026-03-01T10:00:00"},
-         "document": "old"},
+        {
+            "id": "d3",
+            "metadata": {"room": "diary", "wing": "wing_claude", "filed_at": "2026-03-01T10:00:00"},
+            "document": "old",
+        },
         # In allowlist, in window, but exclude_rooms hits — drop.
-        {"id": "d4", "metadata": {"room": "data", "wing": "x",
-                                   "filed_at": "2026-04-23T10:00:00"},
-         "document": "raw"},
+        {
+            "id": "d4",
+            "metadata": {"room": "data", "wing": "x", "filed_at": "2026-04-23T10:00:00"},
+            "document": "raw",
+        },
     ]
     kept = list(
         filter_drawers(
@@ -105,9 +123,11 @@ def test_filter_drawers_returns_only_allowlisted_rooms_within_window():
 def test_filter_drawers_skips_drawers_with_missing_metadata():
     """ChromaDB occasionally returns None metadata; don't crash the run."""
     drawers = [
-        {"id": "ok", "metadata": {"room": "decisions", "wing": "x",
-                                   "filed_at": "2026-04-23T10:00:00"},
-         "document": "."},
+        {
+            "id": "ok",
+            "metadata": {"room": "decisions", "wing": "x", "filed_at": "2026-04-23T10:00:00"},
+            "document": ".",
+        },
         {"id": "no_meta", "metadata": None, "document": "."},
         {"id": "no_filed_at", "metadata": {"room": "decisions"}, "document": "."},
     ]
@@ -126,14 +146,11 @@ def test_filter_drawers_skips_drawers_with_missing_metadata():
 # extract_heuristic
 # ---------------------------------------------------------------------------
 
-from mempalace.curator import extract_heuristic
-
 
 def test_extract_heuristic_flags_drawer_with_decision_marker():
     drawer = {
         "id": "d1",
-        "metadata": {"room": "decisions", "wing": "mempalace",
-                     "filed_at": "2026-04-23T10:00:00"},
+        "metadata": {"room": "decisions", "wing": "mempalace", "filed_at": "2026-04-23T10:00:00"},
         "document": "We decided to use ChromaDB because it's local and zero-API.",
     }
     result = extract_heuristic(drawer)
@@ -144,8 +161,7 @@ def test_extract_heuristic_flags_drawer_with_decision_marker():
 def test_extract_heuristic_does_not_flag_pure_code():
     drawer = {
         "id": "d2",
-        "metadata": {"room": "decisions", "wing": "mempalace",
-                     "filed_at": "2026-04-23T10:00:00"},
+        "metadata": {"room": "decisions", "wing": "mempalace", "filed_at": "2026-04-23T10:00:00"},
         "document": "def add(a, b):\n    return a + b\n",
     }
     result = extract_heuristic(drawer)
@@ -156,8 +172,7 @@ def test_extract_heuristic_does_not_flag_pure_code():
 def test_extract_heuristic_handles_empty_document():
     drawer = {
         "id": "empty",
-        "metadata": {"room": "decisions", "wing": "x",
-                     "filed_at": "2026-04-23T10:00:00"},
+        "metadata": {"room": "decisions", "wing": "x", "filed_at": "2026-04-23T10:00:00"},
         "document": "",
     }
     result = extract_heuristic(drawer)
@@ -169,16 +184,11 @@ def test_extract_heuristic_handles_empty_document():
 # extract_claude  (subprocess backend, mocked in unit tests)
 # ---------------------------------------------------------------------------
 
-from unittest.mock import patch, MagicMock
-
-from mempalace.curator import extract_claude, build_extraction_prompt
-
 
 def _drawer_for_claude():
     return {
         "id": "d1",
-        "metadata": {"wing": "mempalace", "room": "decisions",
-                     "filed_at": "2026-04-23T10:00:00"},
+        "metadata": {"wing": "mempalace", "room": "decisions", "filed_at": "2026-04-23T10:00:00"},
         "document": "We chose ChromaDB.",
     }
 
@@ -234,8 +244,8 @@ def test_extract_claude_returns_empty_on_subprocess_error():
 
 def test_extract_claude_returns_empty_on_timeout():
     import subprocess as _sp
-    with patch("mempalace.curator.subprocess.run",
-               side_effect=_sp.TimeoutExpired("claude", 60)):
+
+    with patch("mempalace.curator.subprocess.run", side_effect=_sp.TimeoutExpired("claude", 60)):
         result = extract_claude(_drawer_for_claude())
     assert result == {"triples": [], "observations": []}
 
@@ -250,14 +260,11 @@ def test_extract_claude_returns_empty_when_binary_missing():
 # curate() orchestrator
 # ---------------------------------------------------------------------------
 
-from mempalace.curator import curate
-
 
 def _make_drawer(did, room="decisions", text="We chose ChromaDB because local."):
     return {
         "id": did,
-        "metadata": {"room": room, "wing": "mempalace",
-                     "filed_at": "2026-04-23T10:00:00"},
+        "metadata": {"room": room, "wing": "mempalace", "filed_at": "2026-04-23T10:00:00"},
         "document": text,
     }
 
@@ -269,16 +276,23 @@ def test_curate_writes_triples_and_observations_for_flagged_drawers(tmp_path):
         _make_drawer("code", text="def f(): pass"),
     ]
     extraction_response = {
-        "triples": [{"subject": "MemPalace", "predicate": "uses",
-                     "object": "ChromaDB", "valid_from": "2026-04-23"}],
+        "triples": [
+            {
+                "subject": "MemPalace",
+                "predicate": "uses",
+                "object": "ChromaDB",
+                "valid_from": "2026-04-23",
+            }
+        ],
         "observations": ["Switched to ChromaDB."],
     }
 
-    with patch("mempalace.curator._iter_palace_drawers", return_value=iter(drawers)), \
-         patch("mempalace.curator.extract_claude",
-               return_value=extraction_response) as mock_extract, \
-         patch("mempalace.curator.tool_kg_add") as mock_kg_add, \
-         patch("mempalace.curator.tool_diary_write") as mock_diary:
+    with (
+        patch("mempalace.curator._iter_palace_drawers", return_value=iter(drawers)),
+        patch("mempalace.curator.extract_claude", return_value=extraction_response) as mock_extract,
+        patch("mempalace.curator.tool_kg_add") as mock_kg_add,
+        patch("mempalace.curator.tool_diary_write") as mock_diary,
+    ):
         result = curate(
             palace_path=str(tmp_path),
             since=datetime.fromisoformat("2026-04-01T00:00:00"),
@@ -315,11 +329,12 @@ def test_curate_skips_already_processed_drawers(tmp_path):
     drawers = [_make_drawer("d1"), _make_drawer("d2")]
     extraction_response = {"triples": [], "observations": []}
 
-    with patch("mempalace.curator._iter_palace_drawers", return_value=iter(drawers)), \
-         patch("mempalace.curator.extract_claude",
-               return_value=extraction_response) as mock_extract, \
-         patch("mempalace.curator.tool_kg_add"), \
-         patch("mempalace.curator.tool_diary_write"):
+    with (
+        patch("mempalace.curator._iter_palace_drawers", return_value=iter(drawers)),
+        patch("mempalace.curator.extract_claude", return_value=extraction_response) as mock_extract,
+        patch("mempalace.curator.tool_kg_add"),
+        patch("mempalace.curator.tool_diary_write"),
+    ):
         curate(
             palace_path=str(tmp_path),
             since=datetime.fromisoformat("2026-04-01T00:00:00"),
@@ -338,11 +353,12 @@ def test_curate_respects_max_drawers_cap(tmp_path):
     drawers = [_make_drawer(f"d{i}") for i in range(20)]
     extraction_response = {"triples": [], "observations": []}
 
-    with patch("mempalace.curator._iter_palace_drawers", return_value=iter(drawers)), \
-         patch("mempalace.curator.extract_claude",
-               return_value=extraction_response) as mock_extract, \
-         patch("mempalace.curator.tool_kg_add"), \
-         patch("mempalace.curator.tool_diary_write"):
+    with (
+        patch("mempalace.curator._iter_palace_drawers", return_value=iter(drawers)),
+        patch("mempalace.curator.extract_claude", return_value=extraction_response) as mock_extract,
+        patch("mempalace.curator.tool_kg_add"),
+        patch("mempalace.curator.tool_diary_write"),
+    ):
         result = curate(
             palace_path=str(tmp_path),
             since=datetime.fromisoformat("2026-04-01T00:00:00"),
@@ -360,16 +376,16 @@ def test_curate_respects_max_drawers_cap(tmp_path):
 def test_curate_dry_run_does_not_call_kg_or_diary(tmp_path):
     drawers = [_make_drawer("d1")]
     extraction_response = {
-        "triples": [{"subject": "X", "predicate": "is", "object": "Y",
-                     "valid_from": None}],
+        "triples": [{"subject": "X", "predicate": "is", "object": "Y", "valid_from": None}],
         "observations": ["something"],
     }
 
-    with patch("mempalace.curator._iter_palace_drawers", return_value=iter(drawers)), \
-         patch("mempalace.curator.extract_claude",
-               return_value=extraction_response), \
-         patch("mempalace.curator.tool_kg_add") as mock_kg_add, \
-         patch("mempalace.curator.tool_diary_write") as mock_diary:
+    with (
+        patch("mempalace.curator._iter_palace_drawers", return_value=iter(drawers)),
+        patch("mempalace.curator.extract_claude", return_value=extraction_response),
+        patch("mempalace.curator.tool_kg_add") as mock_kg_add,
+        patch("mempalace.curator.tool_diary_write") as mock_diary,
+    ):
         curate(
             palace_path=str(tmp_path),
             since=datetime.fromisoformat("2026-04-01T00:00:00"),
@@ -389,15 +405,15 @@ def test_curate_passes_source_closet_to_kg_add(tmp_path):
     """Verbatim provenance: every triple must carry source_closet=drawer_id."""
     drawers = [_make_drawer("provenance_drawer")]
     extraction_response = {
-        "triples": [{"subject": "A", "predicate": "is", "object": "B",
-                     "valid_from": None}],
+        "triples": [{"subject": "A", "predicate": "is", "object": "B", "valid_from": None}],
         "observations": [],
     }
-    with patch("mempalace.curator._iter_palace_drawers", return_value=iter(drawers)), \
-         patch("mempalace.curator.extract_claude",
-               return_value=extraction_response), \
-         patch("mempalace.curator.tool_kg_add") as mock_kg_add, \
-         patch("mempalace.curator.tool_diary_write"):
+    with (
+        patch("mempalace.curator._iter_palace_drawers", return_value=iter(drawers)),
+        patch("mempalace.curator.extract_claude", return_value=extraction_response),
+        patch("mempalace.curator.tool_kg_add") as mock_kg_add,
+        patch("mempalace.curator.tool_diary_write"),
+    ):
         curate(
             palace_path=str(tmp_path),
             since=datetime.fromisoformat("2026-04-01T00:00:00"),
@@ -435,9 +451,7 @@ def test_curator_writes_to_real_palace_via_heuristic(tmp_path, monkeypatch):
     coll = get_collection(str(palace))
     coll.add(
         ids=["smoke-1"],
-        documents=[
-            "We decided to use ChromaDB because it is local-first and zero-API."
-        ],
+        documents=["We decided to use ChromaDB because it is local-first and zero-API."],
         metadatas=[
             {
                 "room": "decisions",
