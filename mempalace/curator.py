@@ -125,9 +125,7 @@ def extract_heuristic(drawer: dict, min_confidence: float = 0.3) -> dict:
     document = drawer.get("document") or ""
     if not document:
         return {"flagged": False, "memories": []}
-    memories = general_extractor.extract_memories(
-        document, min_confidence=min_confidence
-    )
+    memories = general_extractor.extract_memories(document, min_confidence=min_confidence)
     return {"flagged": bool(memories), "memories": memories}
 
 
@@ -238,11 +236,13 @@ def extract_claude(drawer: dict, timeout_seconds: int = 60) -> dict:
 # Orchestrator
 # ---------------------------------------------------------------------------
 
+
 # Lazy-imported to keep curator import time low and avoid eager
 # initialization of the MCP server module's KG sqlite handle when callers
 # only need state-file utilities.
 def _import_mcp_tools():
     from mempalace.mcp_server import tool_kg_add, tool_diary_write
+
     return tool_kg_add, tool_diary_write
 
 

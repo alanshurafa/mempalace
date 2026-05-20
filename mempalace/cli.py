@@ -548,9 +548,7 @@ def cmd_curate(args):
 
     from .curator import curate
 
-    palace_path = (
-        os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
-    )
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
 
     if args.since_iso:
         since = datetime.fromisoformat(args.since_iso)
