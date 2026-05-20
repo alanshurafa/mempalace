@@ -1899,3 +1899,55 @@ class TestKGLazyCache:
         with pytest.raises(_sqlite3.ProgrammingError):
             mcp_server._call_kg(lambda kg: kg.query_entity("Alice"))
         assert calls["count"] == 2, "expected exactly one retry beyond the initial attempt"
+
+
+class TestIdleWatchdog:
+    """Regression: an orphaned MCP server must still exit.
+
+    On Windows an MCP host can leak the server's stdin pipe write-handle
+    into sibling processes via handle inheritance. When the host then
+    exits, the server's stdin never reaches EOF, so a server whose only
+    exit path is ``readline()`` returning ``''`` blocks forever and
+    accumulates as a leaked process. The idle watchdog is the second,
+    host-independent exit path.
+    """
+
+    def test_server_exits_on_idle_timeout_without_stdin_eof(self):
+        import subprocess
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = os.environ.copy()
+        env["MEMPALACE_MCP_IDLE_TIMEOUT"] = "3"
+
+        server = subprocess.Popen(
+            [sys.executable, "-m", "mempalace.mcp_server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=repo_root,
+            env=env,
+        )
+        # Hand the server's stdin write-handle to a long-lived sibling so the
+        # server never sees EOF — this reproduces the orphaned-process scenario.
+        leaker = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(120)"],
+            stdin=server.stdin,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            server.stdin.close()  # drop our handle; only the leaker holds it now
+            exited = True
+            try:
+                server.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                exited = False
+                server.kill()
+                server.wait()
+            assert exited, (
+                "MCP server did not exit on idle timeout despite no stdin "
+                "activity and no EOF — it would leak as an orphaned process"
+            )
+        finally:
+            leaker.kill()
+            leaker.wait()

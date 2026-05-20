@@ -2301,7 +2301,63 @@ def _restore_stdout():
     sys.stdout = _REAL_STDOUT
 
 
+# --- Idle watchdog -----------------------------------------------------------
+# An MCP stdio server's normal exit path is stdin EOF — the host closes the
+# pipe. On Windows the host can leak that pipe's write-handle into sibling
+# processes via handle inheritance; when the host then exits, the server's
+# stdin never reaches EOF and a readline()-only server blocks forever,
+# accumulating as a leaked orphan process. The watchdog is a second,
+# host-independent exit path: if no input arrives for the idle window and no
+# request is in flight, the session is gone — exit. Hosts ping active
+# sessions, so prolonged total silence reliably means orphaned. Set
+# MEMPALACE_MCP_IDLE_TIMEOUT=0 to disable; the default is 30 minutes.
+_DEFAULT_IDLE_TIMEOUT = 1800.0
+_last_activity = time.monotonic()
+_in_request = False
+
+
+def _idle_timeout_seconds() -> float:
+    """Idle window in seconds. 0 (or negative) disables the watchdog."""
+    raw = os.environ.get("MEMPALACE_MCP_IDLE_TIMEOUT")
+    if not raw:
+        return _DEFAULT_IDLE_TIMEOUT
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning(
+            f"Invalid MEMPALACE_MCP_IDLE_TIMEOUT={raw!r}; "
+            f"falling back to {_DEFAULT_IDLE_TIMEOUT:.0f}s"
+        )
+        return _DEFAULT_IDLE_TIMEOUT
+
+
+def _start_idle_watchdog(timeout: float) -> None:
+    """Start a daemon thread that exits the process after ``timeout`` seconds
+    with no stdin input and no request in flight. No-op when timeout <= 0."""
+    if timeout <= 0:
+        return
+
+    def _watch() -> None:
+        # Poll often enough that a short (test) timeout fires promptly, but at
+        # most once a minute for the production default.
+        interval = min(60.0, max(1.0, timeout / 4))
+        while True:
+            time.sleep(interval)
+            if _in_request:
+                continue
+            idle = time.monotonic() - _last_activity
+            if idle >= timeout:
+                logger.warning(
+                    f"MCP server idle for {idle:.0f}s (limit {timeout:.0f}s) — "
+                    "host appears gone; exiting to avoid an orphaned process."
+                )
+                os._exit(0)
+
+    threading.Thread(target=_watch, name="mcp-idle-watchdog", daemon=True).start()
+
+
 def main():
+    global _last_activity, _in_request
     _restore_stdout()
     # Force UTF-8 on stdio. MCP JSON-RPC is UTF-8, but Python on Windows
     # defaults stdin/stdout to the system codepage (e.g. cp1251), which
@@ -2318,16 +2374,24 @@ def main():
     # is visible at startup rather than on first use (#1222). Pure
     # filesystem read; never opens a chromadb client.
     _refresh_vector_disabled_flag()
+    _last_activity = time.monotonic()
+    _start_idle_watchdog(_idle_timeout_seconds())
     while True:
         try:
             line = sys.stdin.readline()
             if not line:
                 break
+            _last_activity = time.monotonic()
             line = line.strip()
             if not line:
                 continue
             request = json.loads(line)
-            response = handle_request(request)
+            _in_request = True
+            try:
+                response = handle_request(request)
+            finally:
+                _in_request = False
+                _last_activity = time.monotonic()
             if response is not None:
                 sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
                 sys.stdout.flush()
