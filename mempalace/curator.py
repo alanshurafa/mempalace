@@ -18,7 +18,7 @@ import re
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
@@ -404,7 +404,7 @@ def curate(
         state.mark_processed([did])
         drawers_processed += 1
 
-    state.last_run_iso = datetime.utcnow().isoformat()
+    state.last_run_iso = datetime.now(timezone.utc).isoformat()
     if not dry_run:
         state.save()
 
